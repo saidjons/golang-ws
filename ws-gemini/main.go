@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"ws-gemini/services"
 	"ws-gemini/types"
 
 	"github.com/gorilla/websocket"
@@ -19,6 +20,20 @@ func main() {
 	go handleMessages()
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+
+		// Get "token" from query params: ?token=12345
+		queryParams := r.URL.Query()
+		token := queryParams.Get("token")
+
+		// --- 2. VALIDATE TOKEN ---
+		userID, username, err := services.ValidateToken(token)
+		if err != nil {
+			// If invalid, return 401 Unauthorized and STOP.
+			// Do NOT upgrade the connection.
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
@@ -26,9 +41,12 @@ func main() {
 
 		// 1. Initialize Client with the WSMessage channel
 		client := &types.Client{
-			Conn: conn,
-			Send: make(chan types.WSMessage, 256), // <--- MATCHES STRUCT
+			Conn:     conn,
+			Send:     make(chan types.WSMessage, 256),
+			UserID:   userID,
+			Username: username,
 		}
+		// if !client.Isexist
 		client.AddtoPool()
 
 		// 2. Replay History
@@ -40,7 +58,7 @@ func main() {
 		types.HistoryMu.Unlock()
 
 		fmt.Printf("Client connected. Total: %d\n", len(types.Clients))
-
+		fmt.Printf("Authenticated Client Connected: %s (%s)\n", username, userID)
 		go client.WritePump()
 		client.ReadPump(broadcast)
 	})
@@ -57,7 +75,8 @@ func handleMessages() {
 		// 2. Extract the payload
 		payload := internalMsg.Payload
 		// Use .Client instead of .SenderClient
-		payload.Sender = internalMsg.Client.Conn.RemoteAddr().String()
+		// payload.Sender = internalMsg.Client.Conn.RemoteAddr().String()
+		payload.Sender = internalMsg.Client.Username
 
 		// 3. Save to History
 		types.HistoryMu.Lock()
@@ -79,7 +98,7 @@ func handleMessages() {
 			case client.Send <- payload:
 			default:
 				close(client.Send)
-				delete(types.Clients, client.Conn)
+				delete(types.Clients, client.UserID)
 			}
 		}
 		types.ClientsMu.Unlock()

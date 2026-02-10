@@ -8,12 +8,14 @@ import (
 )
 
 type Client struct {
-	Conn *websocket.Conn
-	Send chan WSMessage // Channel now sends JSON structs
+	Conn     *websocket.Conn
+	Send     chan WSMessage
+	UserID   string
+	Username string
 }
 
 var (
-	Clients   = make(map[*websocket.Conn]*Client)
+	Clients   = make(map[string]*Client)
 	ClientsMu sync.Mutex
 
 	History   []WSMessage
@@ -23,13 +25,13 @@ var (
 func (client *Client) AddtoPool() {
 	ClientsMu.Lock()
 	defer ClientsMu.Unlock()
-	Clients[client.Conn] = client
+	Clients[client.UserID] = client
 }
 
 func (client *Client) RemoveFromPool() {
 	ClientsMu.Lock()
 	defer ClientsMu.Unlock()
-	delete(Clients, client.Conn)
+	delete(Clients, client.UserID)
 }
 
 // talkToClient()  /The Sender
@@ -90,17 +92,3 @@ func (c *Client) ReadPump(broadcast chan Message) {
 		}
 	}
 }
-
-/*
-Server (You)                     Client (User)
-      +-------------+                 +-------------+
-      |             |                 |             |
-      |  ReadPump   | <---(Lane 1)--- |   Browser   |  (User types "Hello")
-      |   (Ear)     |                 |             |
-      |             |                 |             |
-      |  WritePump  | ---(Lane 2)---> |   Browser   |  (Server sends "Welcome")
-      |   (Mouth)   |                 |             |
-      +-------------+                 +-------------+
-
-
-*/
