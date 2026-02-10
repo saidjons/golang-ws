@@ -1,7 +1,6 @@
 package types
 
 import (
-	"encoding/json"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -12,6 +11,7 @@ type Client struct {
 	Send     chan WSMessage
 	UserID   string
 	Username string
+	Rooms    map[*Room]bool
 }
 
 var (
@@ -61,34 +61,52 @@ func (c *Client) ReadPump(broadcast chan Message) {
 	// ... (Keep your SetReadLimit and PongHandler code here) ...
 
 	for {
-		// STEP 1: Read the raw bytes (Network Check)
-		_, rawMessage, err := c.Conn.ReadMessage()
-		if err != nil {
-			// If the socket closed or network failed, stop the loop.
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				// Log only real network errors
-			}
-			break // <--- FATAL ERROR: Kill connection
-		}
-
-		// STEP 2: Try to parse the JSON (Data Check)
 		var incoming WSMessage
-		if err := json.Unmarshal(rawMessage, &incoming); err != nil {
-			// NON-FATAL ERROR: The user sent garbage (e.g., plain text)
-			// We just log it and ignore this specific message.
-			// We do NOT break the loop.
-			// Optional: Send an error message back to the user
-			c.Conn.WriteJSON(WSMessage{
-				Type:    "error",
-				Content: "Invalid JSON format. Please send a JSON object like {\"type\":\"text\", \"content\":\"Hello\"}.",
-			})
-			continue // <--- Skip to next message, keep connection alive!
+		err := c.Conn.ReadJSON(&incoming)
+		if err != nil {
+			break
 		}
 
-		// STEP 3: Success! Send to Hub
-		broadcast <- Message{
-			Client:  c,
-			Payload: incoming,
+		// --- NEW: LOGIC ROUTER ---
+		switch incoming.Type {
+
+		case "join":
+			// 1. Permission Check (Mock)
+			if incoming.Content == "admin-only" && c.UserID != "admin" {
+				c.Send <- WSMessage{Type: "error", Content: "Permission Denied"}
+				continue
+			}
+
+			// 2. Join the Room
+			c.JoinRoom(incoming.Content) // Content = "general"
+			c.Send <- WSMessage{Type: "system", Content: "Joined " + incoming.Content}
+
+		case "message":
+			// 3. Send to Specific Room
+			// The user must tell us WHICH room they are sending to
+			targetRoomName := incoming.Room // You need to add 'Room' field to WSMessage
+
+			if room, ok := GlobalHub.Rooms[targetRoomName]; ok {
+				// Check if user is actually IN that room
+				if _, inRoom := room.Clients[c]; inRoom {
+					room.Broadcast <- incoming
+				} else {
+					c.Send <- WSMessage{Type: "error", Content: "You are not in this room"}
+				}
+			}
 		}
 	}
+}
+
+func (c *Client) JoinRoom(roomName string) {
+	room := GlobalHub.GetRoom(roomName)
+
+	// Add to Room's list
+	room.Clients[c] = true
+
+	// Add to Client's list
+	if c.Rooms == nil {
+		c.Rooms = make(map[*Room]bool)
+	}
+	c.Rooms[room] = true
 }

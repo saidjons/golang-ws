@@ -12,6 +12,7 @@ type Client struct {
 	Send     chan WSMessage
 	UserID   string
 	Username string
+	Rooms    map[*Room]bool // Track which rooms I am in
 }
 
 var (
@@ -53,10 +54,10 @@ func (c *Client) WritePump() {
 // listenToClient()  /The Receiver
 
 func (c *Client) ReadPump(broadcast chan Message) {
-	defer func() {
-		c.RemoveFromPool()
-		c.Conn.Close()
-	}()
+	// defer func() {
+	// 	c.RemoveFromPool()
+	// 	c.Conn.Close()
+	// }()
 
 	// ... (Keep your SetReadLimit and PongHandler code here) ...
 

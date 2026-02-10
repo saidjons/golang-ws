@@ -13,6 +13,7 @@ type WSMessage struct {
 	Type    string `json:"type"`    // "text", "image"
 	Content string `json:"content"` // "Hello World"
 	Sender  string `json:"sender"`  // "User 127.0.0.1"
+	Room    string `json:"room"`
 }
 
 // --- 2. The Internal Hub Data (What stays in the server) ---
