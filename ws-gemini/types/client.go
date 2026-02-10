@@ -1,36 +1,22 @@
 package types
 
 import (
+	"encoding/json"
 	"sync"
-	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-const (
-	// Time allowed to write a message to the peer.
-	writeWait = 10 * time.Second
-
-	// Time allowed to read the next pong message from the peer.
-	pongWait = 60 * time.Second
-
-	// Send pings to peer with this period. Must be less than pongWait.
-	pingPeriod = (pongWait * 9) / 10
-)
-
 type Client struct {
-	Conn             *websocket.Conn
-	ConnectedTime    time.Time
-	DisConnectedTime time.Time
-	IsDisConnected   bool
-	Send             chan []Message
+	Conn *websocket.Conn
+	Send chan WSMessage // Channel now sends JSON structs
 }
 
 var (
 	Clients   = make(map[*websocket.Conn]*Client)
 	ClientsMu sync.Mutex
 
-	History   []Message
+	History   []WSMessage
 	HistoryMu sync.Mutex
 )
 
@@ -46,54 +32,23 @@ func (client *Client) RemoveFromPool() {
 	delete(Clients, client.Conn)
 }
 
-func (client *Client) IsExists() bool {
-	ClientsMu.Lock()
-	defer ClientsMu.Unlock()
-	_, exists := Clients[client.Conn]
-	return exists
-}
-
+// talkToClient()  /The Sender
 func (c *Client) WritePump() {
-	ticker := time.NewTicker(pingPeriod)
-	defer func() {
-		ticker.Stop()
-		c.Conn.Close()
-	}()
-
+	defer c.Conn.Close()
 	for {
-		select {
-		case msg, ok := <-c.Send:
-			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok {
-				// The Hub closed the channel.
-				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
-
-			w, err := c.Conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
-			w.Write(msg)
-
-			// Optimization: Add queued chat messages to the current websocket message.
-			n := len(c.Send)
-			for i := 0; i < n; i++ {
-				w.Write(<-c.Send)
-			}
-
-			if err := w.Close(); err != nil {
-				return
-			}
-
-		case <-ticker.C:
-			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
-			}
+		msg, ok := <-c.Send
+		if !ok {
+			c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
+			return
+		}
+		// WriteJSON automatically converts the struct to {"type":"...", "content":"..."}
+		if err := c.Conn.WriteJSON(msg); err != nil {
+			return
 		}
 	}
 }
+
+// listenToClient()  /The Receiver
 
 func (c *Client) ReadPump(broadcast chan Message) {
 	defer func() {
@@ -101,29 +56,51 @@ func (c *Client) ReadPump(broadcast chan Message) {
 		c.Conn.Close()
 	}()
 
-	c.Conn.SetReadLimit(512)
-	c.Conn.SetReadDeadline(time.Now().Add(pongWait))
-	c.Conn.SetPongHandler(func(string) error {
-		c.Conn.SetReadDeadline(time.Now().Add(pongWait))
-		return nil
-	})
+	// ... (Keep your SetReadLimit and PongHandler code here) ...
 
 	for {
-		// FIX 3: Capture the message! (Use 'message', not '_')
-		var incoming WSMessage
-		err := c.Conn.ReadJSON(&incoming) // <--- Go handles the JSON parsing for you!
-
+		// STEP 1: Read the raw bytes (Network Check)
+		_, rawMessage, err := c.Conn.ReadMessage()
 		if err != nil {
+			// If the socket closed or network failed, stop the loop.
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				// Log only unexpected errors
+				// Log only real network errors
 			}
-			break
+			break // <--- FATAL ERROR: Kill connection
 		}
 
-		// FIX 4: Actually send the message to the hub
+		// STEP 2: Try to parse the JSON (Data Check)
+		var incoming WSMessage
+		if err := json.Unmarshal(rawMessage, &incoming); err != nil {
+			// NON-FATAL ERROR: The user sent garbage (e.g., plain text)
+			// We just log it and ignore this specific message.
+			// We do NOT break the loop.
+			// Optional: Send an error message back to the user
+			c.Conn.WriteJSON(WSMessage{
+				Type:    "error",
+				Content: "Invalid JSON format. Please send a JSON object like {\"type\":\"text\", \"content\":\"Hello\"}.",
+			})
+			continue // <--- Skip to next message, keep connection alive!
+		}
+
+		// STEP 3: Success! Send to Hub
 		broadcast <- Message{
-			Sender:  c,
+			Client:  c,
 			Payload: incoming,
 		}
 	}
 }
+
+/*
+Server (You)                     Client (User)
+      +-------------+                 +-------------+
+      |             |                 |             |
+      |  ReadPump   | <---(Lane 1)--- |   Browser   |  (User types "Hello")
+      |   (Ear)     |                 |             |
+      |             |                 |             |
+      |  WritePump  | ---(Lane 2)---> |   Browser   |  (Server sends "Welcome")
+      |   (Mouth)   |                 |             |
+      +-------------+                 +-------------+
+
+
+*/

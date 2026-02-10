@@ -9,16 +9,15 @@ const (
 	MsgTypeAudio = "audio"
 )
 
-// 2. Define the JSON Structure
-// This is what goes over the wire
 type WSMessage struct {
-	Type    string `json:"type"`    // "text", "image", "file"
-	Content string `json:"content"` // The text OR the URL
-	Sender  string `json:"sender"`  // The Username (optional)
+	Type    string `json:"type"`    // "text", "image"
+	Content string `json:"content"` // "Hello World"
+	Sender  string `json:"sender"`  // "User 127.0.0.1"
 }
 
+// --- 2. The Internal Hub Data (What stays in the server) ---
 type Message struct {
 	Timestamp time.Time
-	Sender    *Client
-	Payload   WSMessage
+	Client    *Client   // <--- The pointer to the User connection
+	Payload   WSMessage // <--- The actual JSON data
 }

@@ -9,18 +9,13 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
+	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-// Global broadcast channel
+// FIX: Channel carries the Internal 'Message' struct
 var broadcast = make(chan types.Message)
 
 func main() {
-	// Start the "Hub" in the background
 	go handleMessages()
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -29,34 +24,25 @@ func main() {
 			return
 		}
 
-		// 1. Create Client
-		client := &types.Client{Conn: conn, Send: make(chan types.WSMessage, 256)}
-
-		// 2. Add to Pool
+		// 1. Initialize Client with the WSMessage channel
+		client := &types.Client{
+			Conn: conn,
+			Send: make(chan types.WSMessage, 256), // <--- MATCHES STRUCT
+		}
 		client.AddtoPool()
 
-		// 3. Replay History (Safe to do before starting pumps)
+		// 2. Replay History
 		types.HistoryMu.Lock()
 		for _, oldMsg := range types.History {
-			// Note: Direct write is okay here because pumps aren't running yet
-			conn.WriteMessage(websocket.TextMessage, oldMsg)
+			// FIX: Use WriteJSON because oldMsg is a Struct now
+			conn.WriteJSON(oldMsg)
 		}
 		types.HistoryMu.Unlock()
 
-		fmt.Printf("Client connected %d\n", len(types.Clients))
-		fmt.Printf("Remote Address: %s\n", conn.RemoteAddr())
+		fmt.Printf("Client connected. Total: %d\n", len(types.Clients))
 
-		// 4. Start the Write Pump (Background Worker)
-		// This handles Pings and writing messages to the user.
 		go client.WritePump()
-
-		// 5. Start the Read Pump (BLOCKING)
-		// CRITICAL: We do NOT use 'go' here. We want this to block.
-		// We pass 'broadcast' so the package knows where to send messages.
 		client.ReadPump(broadcast)
-
-		// When ReadPump finishes (user disconnects), the function exits
-		// and the defer inside ReadPump cleans everything up.
 	})
 
 	fmt.Println("Server started on :8080")
@@ -65,31 +51,32 @@ func main() {
 
 func handleMessages() {
 	for {
-		msg := <-broadcast
+		// 1. Receive the Internal Message
+		internalMsg := <-broadcast
 
-		// Save to History
+		// 2. Extract the payload
+		payload := internalMsg.Payload
+		// Use .Client instead of .SenderClient
+		payload.Sender = internalMsg.Client.Conn.RemoteAddr().String()
+
+		// 3. Save to History
 		types.HistoryMu.Lock()
-
-		types.History = append(types.History, msg)
-
+		types.History = append(types.History, payload)
 		if len(types.History) > 10 {
 			types.History = types.History[1:]
 		}
-
 		types.HistoryMu.Unlock()
 
-		// Broadcast to all clients
+		// 4. Broadcast
 		types.ClientsMu.Lock()
 		for _, client := range types.Clients {
-			if client == msg.Sender {
+			// FIX: Check against .Client
+			if client == internalMsg.Client {
 				continue
 			}
 
 			select {
-			case client.Send <- msg:
-				// Message sent successfully
-				fmt.Printf("Sent message to client %s\n", client.Conn.RemoteAddr())
-				// Optionally, you can log the message content here
+			case client.Send <- payload:
 			default:
 				close(client.Send)
 				delete(types.Clients, client.Conn)
