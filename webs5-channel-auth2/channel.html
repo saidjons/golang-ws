@@ -1,0 +1,27 @@
+<!doctype html>
+<html><body>
+  <input id="tok" placeholder="paste JWT"><button id="connect">Connect</button><br>
+  <input id="ch"  placeholder="channel"><input id="msg" placeholder="json payload">
+  <button id="send">Send</button>
+  <pre id="log"></pre>
+
+  <script>
+    let ws;
+    const log = (m) => document.getElementById('log').textContent += m + '\n';
+
+    document.getElementById('connect').onclick = () => {
+      const token = document.getElementById('tok').value;
+      ws = new WebSocket('ws://localhost:8080/ws?token=' + encodeURIComponent(token));
+      ws.onopen  = () => log('AUTH\'d socket open');
+      ws.onclose = () => log('socket closed');
+      ws.onmessage = (e) => log('< '+e.data);
+    };
+
+    document.getElementById('send').onclick = () => {
+      const ch = document.getElementById('ch').value;
+      const payload = document.getElementById('msg').value;
+      const envelope = JSON.stringify({channel: ch, payload: JSON.parse(payload)});
+      ws.send(envelope);
+    };
+  </script>
+</body></html>
