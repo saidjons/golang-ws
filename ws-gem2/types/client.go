@@ -12,10 +12,11 @@ type Client struct {
 	UserID   string
 	Username string
 	Rooms    map[*Room]bool
+	mu       sync.RWMutex
 }
 
 var (
-	Clients   = make(map[string]*Client)
+	Clients   = make(map[string][]*Client)
 	ClientsMu sync.Mutex
 
 	History   []WSMessage
@@ -25,13 +26,28 @@ var (
 func (client *Client) AddtoPool() {
 	ClientsMu.Lock()
 	defer ClientsMu.Unlock()
-	Clients[client.UserID] = client
+	Clients[client.UserID] = append(Clients[client.UserID], client)
 }
 
-func (client *Client) RemoveFromPool() {
+func (c *Client) RemoveFromPool() {
 	ClientsMu.Lock()
 	defer ClientsMu.Unlock()
-	delete(Clients, client.UserID)
+
+	userConnections := Clients[c.UserID]
+
+	for i, client := range userConnections {
+		// Compare pointers: Is this the specific tab that closed?
+		if client == c {
+			// Cut it out of the list
+			Clients[c.UserID] = append(userConnections[:i], userConnections[i+1:]...)
+			break
+		}
+	}
+
+	// Clean up empty keys
+	if len(Clients[c.UserID]) == 0 {
+		delete(Clients, c.UserID)
+	}
 }
 
 // talkToClient()  /The Sender
@@ -71,15 +87,35 @@ func (c *Client) ReadPump(broadcast chan Message) {
 		switch incoming.Type {
 
 		case "join":
-			// 1. Permission Check (Mock)
-			if incoming.Content == "admin-only" && c.UserID != "admin" {
-				c.Send <- WSMessage{Type: "error", Content: "Permission Denied"}
-				continue
+			roomName := incoming.Content
+			room := GlobalHub.GetRoom(roomName)
+
+			// 2. Add this client to the room
+			room.Join(c)
+
+			// 3. (Optional) Confirm to user
+			c.Send <- WSMessage{Type: "system", Content: "You joined " + roomName}
+		case "get_users":
+			// 1. Which room?
+			roomName := incoming.Content
+
+			// 2. Get the list (Thread-Safe)
+			onlineUsers := GlobalHub.GetOnlineUsers(roomName)
+
+			// 3. Convert list to a single string (e.g., "Alice, Bob")
+			// OR send a JSON array if you prefer
+			// Simple comma-separated string for now:
+			userListString := ""
+			for _, u := range onlineUsers {
+				userListString += u + ","
 			}
 
-			// 2. Join the Room
-			c.JoinRoom(incoming.Content) // Content = "general"
-			c.Send <- WSMessage{Type: "system", Content: "Joined " + incoming.Content}
+			// 4. Send ONLY to the user who asked
+			c.Send <- WSMessage{
+				Type:    "user_list",
+				Content: userListString, // "Alice,Bob,Charlie,"
+				Room:    roomName,
+			}
 
 		case "message":
 			// 3. Send to Specific Room
@@ -100,11 +136,14 @@ func (c *Client) ReadPump(broadcast chan Message) {
 
 func (c *Client) JoinRoom(roomName string) {
 	room := GlobalHub.GetRoom(roomName)
-
+	room.Join(c)
 	// Add to Room's list
 	room.Clients[c] = true
 
 	// Add to Client's list
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.Rooms == nil {
 		c.Rooms = make(map[*Room]bool)
 	}

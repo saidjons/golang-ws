@@ -48,6 +48,8 @@ func main() {
 		}
 		// if !client.Isexist
 		client.AddtoPool()
+		// auto join the "general" room
+		types.GlobalHub.GetRoom("general").Join(client)
 
 		// 2. Replay History
 		types.HistoryMu.Lock()

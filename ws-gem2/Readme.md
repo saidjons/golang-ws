@@ -29,9 +29,13 @@ User Chats:
 
  Here is the checklist to fix this:
 
-    User B must send {"type": "join", "content": "sports"} first.
+    join room  {"type": "join", "content": "sports"} first.
 
-    User A then sends {"type": "message", "room": "sports", "content": "Goal!"}.
+    send message {"type": "message", "room": "sports", "content": "Goal!"}.
+    
+    get online users {"type": "get_users", "content": "general"}
 
-    The Server routes the message only to people in the "sports" list.
+    
+
+ 
 
