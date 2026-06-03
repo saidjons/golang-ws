@@ -1,0 +1,31 @@
+<!doctype html>
+<html><body>
+  <input id="i" placeholder="type JSON"><button id="b">Send</button>
+  <pre id="log"></pre>
+
+  <script>
+    const log = (m) => document.getElementById('log').textContent += m + '\n';
+    const ws  = new WebSocket('ws://localhost:8080/ws');
+
+    ws.onopen  = () => log('connected');
+    ws.onclose = () => log('disconnected');
+    ws.onerror = (e) => log('error '+e);
+
+    /* ---- listen for JSON from the channel ---- */
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        log('< '+JSON.stringify(msg));
+      } catch(e) {
+        log('< (invalid json) '+event.data);
+      }
+    };
+
+    /* ---- send JSON to the channel ---- */
+    document.getElementById('b').onclick = () => {
+      const raw = document.getElementById('i').value;
+      ws.send(raw);               // hub will echo to everyone
+      document.getElementById('i').value = '';
+    };
+  </script>
+</body></html>
