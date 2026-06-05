@@ -1,13 +1,14 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"sync"
 	"time"
+
+	"webs9-chat-db/database"
+	"webs9-chat-db/types"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
@@ -20,59 +21,13 @@ var (
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
-
-	db *sql.DB
 )
 
-type Message struct {
-	Type      string `json:"type"` // "message", "join", "auth_success", "error"
-	Username  string `json:"username,omitempty"`
-	Room      string `json:"room,omitempty"`
-	Content   string `json:"content,omitempty"`
-	Timestamp string `json:"timestamp"`
-}
-
-type Client struct {
-	conn   *websocket.Conn
-	send   chan []byte
-	userID string // empty if not authenticated
-	room   string
-}
-
-type Hub struct {
-	rooms      map[string]map[*Client]bool
-	mu         sync.RWMutex
-	broadcast  chan Message
-	register   chan *Client
-	unregister chan *Client
-}
-
-var hub = Hub{
-	rooms:      make(map[string]map[*Client]bool),
-	broadcast:  make(chan Message, 100),
-	register:   make(chan *Client),
-	unregister: make(chan *Client),
-}
-
-func initDB() {
-	var err error
-	db, err = sql.Open("sqlite3", "./db.sqlite")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS messages (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			room TEXT,
-			username TEXT,
-			content TEXT,
-			timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-		);
-	`)
-	if err != nil {
-		log.Fatal(err)
-	}
+var hub = types.Hub{
+	Rooms:      make(map[string]map[*types.Client]bool),
+	Broadcast:  make(chan types.Message, 100),
+	Register:   make(chan *types.Client),
+	Unregister: make(chan *types.Client),
 }
 
 func saveMessage(room, username, content string) {
@@ -82,18 +37,18 @@ func saveMessage(room, username, content string) {
 	}
 }
 
-func getRecentMessages(room string, limit int) []Message {
+func getRecentMessages(room string, limit int) []types.Message {
 	rows, err := db.Query("SELECT username, content, timestamp FROM messages WHERE room = ? ORDER BY id DESC LIMIT ?", room, limit)
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
 
-	var msgs []Message
+	var msgs []types.Message
 	for rows.Next() {
 		var username, content, ts string
 		rows.Scan(&username, &content, &ts)
-		msgs = append(msgs, Message{
+		msgs = append(msgs, types.Message{
 			Type:      "message",
 			Username:  username,
 			Content:   content,
@@ -109,61 +64,61 @@ func getRecentMessages(room string, limit int) []Message {
 	return msgs
 }
 
-func (h *Hub) run() {
+func (h *types.Hub) run() {
 	for {
 		select {
-		case client := <-h.register:
-			h.mu.Lock()
-			if h.rooms[client.room] == nil {
-				h.rooms[client.room] = make(map[*Client]bool)
+		case client := <-h.Register:
+			h.Mu.Lock()
+			if h.Rooms[client.Room] == nil {
+				h.Rooms[client.Room] = make(map[*types.Client]bool)
 			}
-			h.rooms[client.room][client] = true
-			h.mu.Unlock()
+			h.Rooms[client.Room][client] = true
+			h.Mu.Unlock()
 
-			welcome := Message{Type: "join", Content: "Welcome to room: " + client.room, Timestamp: time.Now().Format(time.RFC3339)}
-			client.send <- marshal(welcome)
+			welcome := types.Message{Type: "join", Content: "Welcome to room: " + client.Room, Timestamp: time.Now().Format(time.RFC3339)}
+			client.Send <- marshal(welcome)
 
 			// Send history (public always gets it, private only if authenticated)
-			if client.room == "public" || client.userID != "" {
+			if client.Room == "public" || client.UserID != "" {
 				for _, m := range getRecentMessages(client.room, 20) {
-					client.send <- marshal(m)
+					client.Send <- marshal(m)
 				}
 			}
 
-		case client := <-h.unregister:
-			h.mu.Lock()
-			if roomClients, ok := h.rooms[client.room]; ok {
+		case client := <-h.Unregister:
+			h.Mu.Lock()
+			if roomClients, ok := h.Rooms[client.Room]; ok {
 				if _, ok := roomClients[client]; ok {
 					delete(roomClients, client)
-					close(client.send)
+					close(client.Send)
 					if len(roomClients) == 0 {
-						delete(h.rooms, client.room)
+						delete(h.Rooms, client.Room)
 					}
 				}
 			}
-			h.mu.Unlock()
+			h.Mu.Unlock()
 
-		case message := <-h.broadcast:
+		case message := <-h.Broadcast:
 			data := marshal(message)
 			saveMessage(message.Room, message.Username, message.Content)
 
-			h.mu.RLock()
-			clients := h.rooms[message.Room]
-			h.mu.RUnlock()
+			h.Mu.RLock()
+			clients := h.Rooms[message.Room]
+			h.Mu.RUnlock()
 
 			for client := range clients {
-				if message.Room != "public" && client.userID == "" {
+				if message.Room != "public" && client.UserID == "" {
 					continue // block unauth in private rooms
 				}
 
 				select {
-				case client.send <- data:
+				case client.Send <- data:
 				default:
 					// Client is dead/slow
-					h.mu.Lock()
-					delete(h.rooms[client.room], client)
-					close(client.send)
-					h.mu.Unlock()
+					h.Mu.Lock()
+					delete(h.Rooms[client.Room], client)
+					close(client.Send)
+					h.Mu.Unlock()
 				}
 			}
 		}
@@ -194,27 +149,27 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		room = "public"
 	}
 
-	client := &Client{
-		conn:   conn,
-		send:   make(chan []byte, 256),
-		room:   room,
-		userID: "",
+	client := &types.Client{
+		Conn:   conn,
+		Send:   make(chan []byte, 256),
+		Room:   room,
+		UserID: "",
 	}
 
-	hub.register <- client
+	hub.Register <- client
 	go client.writePump()
 	client.readPump()
 }
 
-func (c *Client) readPump() {
+func (c *types.Client) readPump() {
 	defer func() {
-		hub.unregister <- c
-		c.conn.Close()
+		hub.Unregister <- c
+		c.Conn.Close()
 	}()
 
 	for {
-		var msg Message
-		err := c.conn.ReadJSON(&msg)
+		var msg types.Message
+		err := c.Conn.ReadJSON(&msg)
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("Unexpected close error: %v", err)
@@ -223,84 +178,46 @@ func (c *Client) readPump() {
 		}
 
 		// Authentication
-		if msg.Type == "auth" && c.userID == "" {
+		if msg.Type == "auth" && c.UserID == "" {
 			token, err := jwt.Parse(msg.Content, func(t *jwt.Token) (interface{}, error) {
 				return jwtSecret, nil
 			})
 
 			if err != nil || !token.Valid {
-				c.send <- marshal(Message{Type: "error", Content: "Invalid token"})
+				c.Send <- marshal(types.Message{Type: "error", Content: "Invalid token"})
 				continue
 			}
 
 			claims := token.Claims.(jwt.MapClaims)
 			username := claims["username"].(string)
-			c.userID = username
+			c.UserID = username
 
-			c.send <- marshal(Message{
+			c.Send <- marshal(types.Message{
 				Type: "auth_success", Username: username, Content: "Authenticated!", Timestamp: time.Now().Format(time.RFC3339),
 			})
 
 			// Send history after auth
 			for _, m := range getRecentMessages(c.room, 20) {
-				c.send <- marshal(m)
+				c.Send <- marshal(m)
 			}
 			continue
 		}
 
 		// Block unauthenticated sends in private rooms
-		if c.room != "public" && c.userID == "" {
-			c.send <- marshal(Message{Type: "error", Content: "Auth required"})
+		if c.Room != "public" && c.UserID == "" {
+			c.Send <- marshal(types.Message{Type: "error", Content: "Auth required"})
 			continue
 		}
 
 		if msg.Type == "message" && msg.Content != "" {
-			broadcastMsg := Message{
+			broadcastMsg := types.Message{
 				Type:      "message",
-				Username:  c.userID,
+				Username:  c.UserID,
 				Content:   msg.Content,
-				Room:      c.room,
+				Room:      c.Room,
 				Timestamp: time.Now().Format(time.RFC3339),
 			}
-			hub.broadcast <- broadcastMsg
-		}
-	}
-}
-
-func (c *Client) writePump() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case message, ok := <-c.send:
-			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
-
-			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			w, err := c.conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
-			w.Write(message)
-
-			// Send all queued messages in one batch
-			for len(c.send) > 0 {
-				w.Write([]byte{'\n'})
-				w.Write(<-c.send)
-			}
-
-			if err := w.Close(); err != nil {
-				return
-			}
-
-		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
-			}
+			hub.Broadcast <- broadcastMsg
 		}
 	}
 }
@@ -337,8 +254,10 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	initDB()
-	go hub.run()
+	db := database.InitDB()
+	defer db.Close()
+
+	go hub.Run()
 
 	http.HandleFunc("/ws", handleConnections)
 	http.HandleFunc("/login", loginHandler)
