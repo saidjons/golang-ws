@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"yourproject/internal/auth" // Replace with your actual module path
+	"webs12/internal/auth" // Replace with your actual module path
 
 	"github.com/gorilla/websocket"
 )
@@ -164,14 +164,15 @@ func (c *Client) readPump() {
 		if err := c.conn.ReadJSON(&msg); err != nil {
 			break
 		}
-
-		switch msg.Event {
-		case "auth":
+		switch {
+		case msg.Event == "auth":
 			c.handleAuth(msg)
-		case "pusher:subscribe":
+		case msg.Event == "pusher:subscribe":
 			c.handleSubscribe(msg)
-		case strings.HasPrefix(msg.Event, "client-"): // Client events (e.g., client:typing)
+		case strings.HasPrefix(msg.Event, "client-"):
 			c.handleClientEvent(msg)
+		default:
+			log.Printf("Unknown event received: %s", msg.Event)
 		}
 	}
 }

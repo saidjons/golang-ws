@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"yourproject/internal/auth"
-	"yourproject/internal/ws"
+	"webs12/internal/auth"
+	"webs12/internal/ws"
 )
 
 func main() {
